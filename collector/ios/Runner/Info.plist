@@ -50,5 +50,24 @@
         <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+      <!-- UPI URL schemes -->
+      <string>upi</string>
+      <string>tez</string>
+      <string>paytmmp</string>
+      <string>phonepe</string>
+      <string>googlepay</string>
+      <string>bhim</string>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleURLSchemes</key>
+        <array>
+          <string>your-app-scheme</string>
+        </array>
+      </dict>
+    </array>
 </dict>
 </plist>

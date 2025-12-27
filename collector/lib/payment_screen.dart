@@ -1,25 +1,39 @@
 // screens/payment_screen.dart
-import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:collector/services/api_services.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:collector/model/product_model.dart';
+import 'package:collector/services/api_services.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+
+const PRIMARY = Color(0xFF9C8E18);
+const PRIMARY_LIGHT = Color(0xFFF7EEA8);
+const PRIMARY_DARK = Color(0xFF5E3B1F);
+const ACCENT = Color(0xFFF4D03F);
+const ERROR = Color(0xFFB93D3D);
 
 class PaymentScreen extends StatefulWidget {
   final int orderId;
   final double amount;
   final String customerPhone;
+  final String customerName;
   final Map<String, dynamic> orderData;
   final CalculationResponse calculationResponse;
   final List<Map<String, dynamic>> subProductDetails;
+  final Map<String, dynamic>? apiResponseData;
 
   const PaymentScreen({
     Key? key,
     required this.orderId,
     required this.amount,
     required this.customerPhone,
+    required this.customerName,
     required this.orderData,
     required this.calculationResponse,
     required this.subProductDetails,
+    this.apiResponseData,
   }) : super(key: key);
 
   @override
@@ -28,239 +42,317 @@ class PaymentScreen extends StatefulWidget {
 
 class _PaymentScreenState extends State<PaymentScreen> {
   final ApiService _apiService = ApiService();
-  String? _selectedUpiApp;
-  bool _isProcessing = false;
+
+  bool _isLoading = false;
+  bool _paymentInProgress = false;
   String _error = '';
-  String _paymentStatus = '';
-  bool _paymentSuccess = false;
+  String _paymentStatus = 'pending';
+  String _paymentMessage = '';
+  String? _transactionId;
+  String? _paymentId;
+  DateTime? _paymentTime;
+  String _selectedUpiApp = 'PhonePe';
 
-  // List of popular UPI apps in India
-  final List<Map<String, dynamic>> _upiApps = [
-    {
-      'id': 'gpay',
-      'name': 'Google Pay',
-      'icon': Icons.account_balance_wallet,
-      'color': Color(0xFF5F6368),
-    },
-    {
-      'id': 'phonepe',
-      'name': 'PhonePe',
-      'icon': Icons.phone_android,
-      'color': Color(0xFF5F259F),
-    },
-    {
-      'id': 'paytm',
-      'name': 'Paytm',
-      'icon': Icons.account_balance,
-      'color': Color(0xFF00BAF2),
-    },
-    {
-      'id': 'bhim',
-      'name': 'BHIM UPI',
-      'icon': Icons.currency_rupee,
-      'color': Color(0xFFFB6A02),
-    },
-    {
-      'id': 'amazonpay',
-      'name': 'Amazon Pay',
-      'icon': Icons.shopping_cart,
-      'color': Color(0xFF232F3E),
-    },
-    {
-      'id': 'cash',
-      'name': 'Cash Payment',
-      'icon': Icons.money,
-      'color': Color(0xFF4CAF50),
-    },
-  ];
+  // UPI Payment Details
+  final TextEditingController _amountController = TextEditingController();
+  final TextEditingController _noteController = TextEditingController();
 
-  Future<void> _processPayment() async {
-    if (_selectedUpiApp == null) {
-      setState(() => _error = 'Please select a payment method');
+  // Get UPI ID from order data
+  String get _upiId {
+    return widget.orderData['user_upi_id']?.toString() ??
+        widget.apiResponseData?['data']?['user_upi_id']?.toString() ??
+        '';
+  }
+
+  // Get selling detail ID from order data
+  int get _sellingDetailId {
+    return widget.orderData['id'] is int
+        ? widget.orderData['id'] as int
+        : int.tryParse(widget.orderData['id']?.toString() ?? '') ??
+        widget.orderId;
+  }
+
+  // Get customer contact details
+  String get _customerContact {
+    return widget.customerPhone.isNotEmpty ? widget.customerPhone :
+    widget.orderData['contact']?.toString() ??
+        widget.apiResponseData?['data']?['contact']?.toString() ??
+        '';
+  }
+
+  // Get customer name
+  String get _customerName {
+    return widget.customerName.isNotEmpty ? widget.customerName :
+    widget.orderData['available_person_name']?.toString() ??
+        widget.apiResponseData?['data']?['available_person_name']?.toString() ??
+        'Customer';
+  }
+
+  // Get order reference
+  String get _orderReference {
+    return widget.orderData['order_id']?.toString() ??
+        widget.apiResponseData?['data']?['order_id']?.toString() ??
+        'ORD-${widget.orderId}';
+  }
+
+
+
+  @override
+  void initState() {
+    super.initState();
+
+    print('DEBUG: PaymentScreen initialized');
+    print('DEBUG: Order ID: ${widget.orderId}');
+    print('DEBUG: Selling Detail ID: $_sellingDetailId');
+    print('DEBUG: Amount: ${widget.amount}');
+    print('DEBUG: Customer Phone: ${widget.customerPhone}');
+    print('DEBUG: Customer Name: ${widget.customerName}');
+    print('DEBUG: UPI ID: $_upiId');
+    print('DEBUG: Order Data: ${widget.orderData}');
+    print('DEBUG: API Response Data: ${widget.apiResponseData}');
+
+    // Set initial amount
+    _amountController.text = widget.amount.toStringAsFixed(2);
+    _noteController.text = 'Payment for Order $_orderReference';
+
+    // Initialize payment status
+    //_loadPaymentStatus();
+  }
+
+  @override
+  void dispose() {
+    _amountController.dispose();
+    _noteController.dispose();
+    super.dispose();
+  }
+
+  /*Future<void> _loadPaymentStatus() async {
+    try {
+      setState(() => _isLoading = true);
+
+      // Check if payment already exists for this order
+      final paymentStatus = await _apiService.getPaymentStatus(widget.orderId);
+
+      if (paymentStatus != null && paymentStatus['status'] == 'success') {
+        setState(() {
+          _paymentStatus = 'completed';
+          _paymentMessage = paymentStatus['message'] ?? 'Payment already completed';
+          _transactionId = paymentStatus['transaction_id'];
+          _paymentTime = DateTime.tryParse(paymentStatus['payment_time'] ?? '');
+        });
+      }
+    } catch (e) {
+      print('DEBUG: Error loading payment status: $e');
+      // Ignore error - assume no payment exists
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }*/
+
+  // Generate UPI payment URL
+  String _generateUpiUrl() {
+    final upiId = _upiId;
+    final amount = _amountController.text;
+    final note = Uri.encodeComponent(_noteController.text);
+    final customerName = Uri.encodeComponent(_customerName);
+    final customerPhone = _customerContact;
+    final orderRef = Uri.encodeComponent(_orderReference);
+
+    // Standard UPI URL format
+    String upiUrl = 'upi://pay?pa=$upiId';
+
+    // Add parameters
+    upiUrl += '&pn=$customerName';
+    upiUrl += '&am=$amount';
+    upiUrl += '&tn=$note';
+    upiUrl += '&cu=INR';
+
+    // Add optional parameters
+    if (customerPhone.isNotEmpty) {
+      upiUrl += '&mc=0000'; // Merchant code
+    }
+
+    // Add order reference as transaction reference
+    upiUrl += '&tr=$orderRef';
+
+    print('DEBUG: Generated UPI URL: $upiUrl');
+    return upiUrl;
+  }
+
+  // Initiate UPI Payment
+  Future<void> _initiateUpiPayment() async {
+    if (_upiId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('UPI ID not found for this order'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final amount = double.tryParse(_amountController.text);
+    if (amount == null || amount <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter a valid amount'),
+          backgroundColor: Colors.red,
+        ),
+      );
       return;
     }
 
     setState(() {
-      _isProcessing = true;
+      _paymentInProgress = true;
       _error = '';
-      _paymentStatus = 'Initiating payment...';
     });
 
     try {
-      // Step 1: Initiate payment
-      _paymentStatus = 'Initiating payment...';
-      final paymentResponse = await _apiService.initiatePayment(
-        orderId: widget.orderId,
-        amount: widget.amount,
-        customerPhone: widget.customerPhone,
-      );
+      final upiUrl = _generateUpiUrl();
 
-      // Check if payment was initiated successfully
-      if (paymentResponse['success'] == true) {
-        _paymentStatus = 'Payment initiated. Processing...';
+      if (await canLaunchUrl(Uri.parse(upiUrl))) {
+        // Call accept order API first
 
-        // Simulate payment processing with actual UPI intent
-        if (_selectedUpiApp != 'cash') {
-          // For UPI apps, simulate processing
-          await Future.delayed(const Duration(seconds: 3));
+        // Generate payment and transaction IDs
+        _paymentId = 'PAY${DateTime.now().millisecondsSinceEpoch}';
+        _transactionId = 'TXN${DateTime.now().millisecondsSinceEpoch}';
 
-          // Simulate successful UPI payment
-          final transactionId = 'TXN${DateTime.now().millisecondsSinceEpoch}';
-          final paymentId = 'PAY${DateTime.now().millisecondsSinceEpoch}';
+        // Launch UPI app
+        final result = await launchUrl(
+          Uri.parse(upiUrl),
+          mode: LaunchMode.externalApplication,
+        );
 
-          // Step 2: Verify payment (simulated for demo)
-          _paymentStatus = 'Verifying payment...';
-          await Future.delayed(const Duration(seconds: 2));
-
-          // Step 3: Complete the order
-          _paymentStatus = 'Completing order...';
-          final completeResponse = await _apiService.completeOrder(
-            orderId: widget.orderId,
-            finalAmount: widget.amount,
-            subProductDetails: widget.subProductDetails,
-            paymentId: paymentId,
-            transactionId: transactionId,
-            paymentStatus: 'completed',
-            paymentMethod: 'upi',
-            upiApp: _selectedUpiApp,
-          );
-
-          if (completeResponse['success'] == true) {
-            setState(() {
-              _paymentSuccess = true;
-              _paymentStatus = 'Payment successful!';
-            });
-
-            // Show success message
-            _showSuccessDialog();
-          } else {
-            throw Exception('Failed to complete order');
-          }
-        } else {
-          // For cash payment
-          _paymentStatus = 'Processing cash payment...';
-          await Future.delayed(const Duration(seconds: 2));
-
-          // Complete order for cash payment
-          final completeResponse = await _apiService.completeOrder(
-            orderId: widget.orderId,
-            finalAmount: widget.amount,
-            subProductDetails: widget.subProductDetails,
-            paymentId: null,
-            transactionId: null,
-            paymentStatus: 'completed',
-            paymentMethod: 'cash',
-            upiApp: null,
-          );
-
-          if (completeResponse['success'] == true) {
-            setState(() {
-              _paymentSuccess = true;
-              _paymentStatus = 'Cash payment recorded!';
-            });
-
-            // Show success message for cash
-            _showSuccessDialog(isCash: true);
-          } else {
-            throw Exception('Failed to record cash payment');
-          }
+        if (!result) {
+          throw Exception('Failed to launch UPI app');
         }
+
+        // Show instructions for user
+        _showPaymentInstructions();
+
       } else {
-        throw Exception('Failed to initiate payment: ${paymentResponse['message']}');
+        throw Exception('No UPI app found. Please install a UPI app like Google Pay, PhonePe, or Paytm.');
       }
     } catch (e) {
+      print('DEBUG: Error initiating UPI payment: $e');
       setState(() {
-        _isProcessing = false;
-        _error = e.toString();
-        _paymentStatus = 'Payment failed';
+        _error = 'Failed to initiate payment: ${e.toString()}';
+        _paymentInProgress = false;
       });
 
-      // Show error message
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Payment failed: ${e.toString().replaceAll('Exception: ', '')}'),
+          content: Text('Payment failed: ${e.toString()}'),
           backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
         ),
       );
     }
   }
 
-  void _showSuccessDialog({bool isCash = false}) {
+
+
+  // Show payment instructions dialog
+  void _showPaymentInstructions() {
+    // Show UPI app selection dialog
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            title: const Text('Select UPI App'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Select which UPI app you will use:'),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<String>(
+                  value: _selectedUpiApp,
+                  items: const [
+                    DropdownMenuItem(value: 'Google Pay', child: Text('Google Pay')),
+                    DropdownMenuItem(value: 'PhonePe', child: Text('PhonePe')),
+                    DropdownMenuItem(value: 'Paytm', child: Text('Paytm')),
+                    DropdownMenuItem(value: 'BHIM', child: Text('BHIM')),
+                    DropdownMenuItem(value: 'Other', child: Text('Other')),
+                  ],
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedUpiApp = value ?? 'PhonePe';
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    labelText: 'UPI App',
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Divider(),
+                const SizedBox(height: 16),
+                const Text(
+                  'Payment Instructions:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                _buildInstructionItem('1. Complete payment in $_selectedUpiApp'),
+                _buildInstructionItem('2. Return to this app'),
+                _buildInstructionItem('3. Click "Verify Payment" below'),
+                const SizedBox(height: 8),
+                const Text(
+                  'Note: Do not close this app while payment is in progress.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontStyle: FontStyle.italic,
+                    color: Colors.orange,
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _showPaymentConfirmationDialog();
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: PRIMARY,
+                ),
+                child: const Text('Continue'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _showPaymentConfirmationDialog() {
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(Icons.check_circle, color: Colors.green, size: 30),
-            SizedBox(width: 10),
-            Text(
-              'Payment Successful!',
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: Colors.green,
-              ),
-            ),
-          ],
-        ),
+        title: const Text('Payment Started'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              isCash
-                  ? 'Cash payment of ₹${widget.amount.toStringAsFixed(2)} has been recorded successfully.'
-                  : 'Payment of ₹${widget.amount.toStringAsFixed(2)} has been completed successfully.',
-              style: TextStyle(fontSize: 16),
+              'Payment has been initiated in $_selectedUpiApp.',
+              style: const TextStyle(fontSize: 14),
             ),
-            SizedBox(height: 15),
-            Container(
-              padding: EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Order Details:',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: Colors.blue,
-                    ),
-                  ),
-                  SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('Order ID:', style: TextStyle(color: Colors.grey.shade600)),
-                      Text('#${widget.orderData['order_id']}', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ],
-                  ),
-                  SizedBox(height: 4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('Amount:', style: TextStyle(color: Colors.grey.shade600)),
-                      Text('₹${widget.amount.toStringAsFixed(2)}',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.green)),
-                    ],
-                  ),
-                  SizedBox(height: 4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('Payment Method:', style: TextStyle(color: Colors.grey.shade600)),
-                      Text(
-                        _selectedUpiApp == 'cash' ? 'Cash' : 'UPI (${_getUpiAppName(_selectedUpiApp!)})',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ],
-                  ),
-                ],
+            const SizedBox(height: 12),
+            _buildInstructionItem('1. Complete payment in $_selectedUpiApp'),
+            _buildInstructionItem('2. Return to this app'),
+            _buildInstructionItem('3. Click "Verify Payment" below'),
+            const SizedBox(height: 12),
+            const Text(
+              'Note: Do not close this app while payment is in progress.',
+              style: TextStyle(
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+                color: Colors.orange,
               ),
             ),
           ],
@@ -268,258 +360,200 @@ class _PaymentScreenState extends State<PaymentScreen> {
         actions: [
           TextButton(
             onPressed: () {
-              Navigator.pop(context); // Close dialog
-              Navigator.pop(context, {
-                'paymentSuccess': true,
-                'orderCompleted': true,
-                'paymentMethod': _selectedUpiApp == 'cash' ? 'cash' : 'upi',
-                'upiApp': _selectedUpiApp,
-                'amount': widget.amount,
+              Navigator.pop(context);
+              setState(() {
+                _paymentInProgress = false;
               });
             },
-            child: Text(
-              'Continue',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            child: const Text('Cancel Payment'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _verifyPayment();
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: PRIMARY,
             ),
+            child: const Text('Verify Payment'),
           ),
         ],
       ),
     );
   }
 
-  String _getUpiAppName(String appId) {
-    final app = _upiApps.firstWhere((app) => app['id'] == appId, orElse: () => {});
-    return app['name'] ?? appId.toUpperCase();
-  }
-
-  Widget _buildUpiAppCard(Map<String, dynamic> upiApp) {
-    final isSelected = _selectedUpiApp == upiApp['id'];
-    final isCash = upiApp['id'] == 'cash';
-
-    return Card(
-      elevation: isSelected ? 4 : 1,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-          color: isSelected ? Colors.blue : Colors.grey.shade300,
-          width: isSelected ? 2 : 1,
-        ),
-      ),
-      child: ListTile(
-        leading: Container(
-          width: 50,
-          height: 50,
-          decoration: BoxDecoration(
-            color: isSelected ? upiApp['color'].withOpacity(0.2) : Colors.grey.shade100,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: isSelected ? upiApp['color'] : Colors.transparent,
-              width: 2,
-            ),
-          ),
-          child: Icon(
-            upiApp['icon'],
-            color: upiApp['color'],
-            size: 28,
-          ),
-        ),
-        title: Text(
-          upiApp['name'],
-          style: TextStyle(
-            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-            color: isSelected ? upiApp['color'] : Colors.black87,
-            fontSize: 16,
-          ),
-        ),
-        subtitle: isCash
-            ? Text(
-          'Pay with cash on delivery',
-          style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-        )
-            : null,
-        trailing: Radio<String>(
-          value: upiApp['id'],
-          groupValue: _selectedUpiApp,
-          activeColor: upiApp['color'],
-          onChanged: (value) {
-            setState(() {
-              _selectedUpiApp = value;
-            });
-          },
-        ),
-        onTap: () {
-          setState(() {
-            _selectedUpiApp = upiApp['id'];
-          });
-        },
+  Widget _buildInstructionItem(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.arrow_right, size: 16, color: PRIMARY),
+          const SizedBox(width: 4),
+          Expanded(child: Text(text)),
+        ],
       ),
     );
   }
 
-  Widget _buildOrderSummary() {
-    return Card(
-      elevation: 3,
-      margin: const EdgeInsets.all(16),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(15),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
+  // Verify payment with backend
+  Future<void> _verifyPayment() async {
+    setState(() {
+      _isLoading = true;
+      _error = '';
+    });
+
+    try {
+      // Call API to verify payment and mark order as completed
+      final verificationResponse = await _apiService.verifyPaymentApi(_amountController.text,
+          _sellingDetailId,
+          _paymentId,
+          _transactionId,
+          _selectedUpiApp
+      );
+
+
+      if (verificationResponse['status'] == 'success') {
+        // Payment successful
+        setState(() {
+          _paymentStatus = 'completed';
+          _paymentMessage = verificationResponse['message'] ?? 'Payment completed successfully';
+          _paymentTime = DateTime.now();
+          _paymentInProgress = false;
+        });
+
+        // Show success message
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_paymentMessage),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+
+        // Navigate back or to success screen
+        _showPaymentSuccessDialog();
+
+      } else {
+        // Payment failed or pending
+        setState(() {
+          _paymentStatus = 'failed';
+          _paymentMessage = verificationResponse['message'] ?? 'Payment verification failed';
+          _paymentInProgress = false;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_paymentMessage),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      print('DEBUG: Error verifying payment: $e');
+      setState(() {
+        _error = 'Payment verification failed: ${e.toString()}';
+        _paymentStatus = 'failed';
+        _paymentInProgress = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Payment verification failed: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+
+  // Show payment success dialog
+  void _showPaymentSuccessDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.check_circle, color: Colors.green),
+            SizedBox(width: 8),
+            Text('Payment Successful'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Icon(Icons.receipt_long, color: Colors.blue, size: 24),
-                const SizedBox(width: 10),
-                Text(
-                  'Payment Summary',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.blue,
-                  ),
-                ),
-              ],
-            ),
+            Text('Order: $_orderReference'),
+            Text('Amount: ₹${_amountController.text}'),
+            if (_transactionId != null) Text('Transaction ID: $_transactionId'),
+            if (_paymentId != null) Text('Payment ID: $_paymentId'),
+            Text('UPI App: $_selectedUpiApp'),
+            if (_paymentTime != null) Text('Time: ${_paymentTime!.toLocal()}'),
             const SizedBox(height: 16),
-
-            // Order ID and Customer
-            _buildDetailRow('Order ID', '#${widget.orderData['order_id']}'),
-            _buildDetailRow('Customer', widget.orderData['customer_name'] ?? 'Customer'),
-            _buildDetailRow('Phone', widget.customerPhone),
-
-            const Divider(height: 20),
-
-            // Items summary
-            Text(
-              'Items:',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                color: Colors.grey.shade700,
-              ),
-            ),
-            const SizedBox(height: 8),
-            ...widget.subProductDetails.take(3).map((item) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '• ${item['sub_product_name']}',
-                        style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    Text(
-                      '${item['weight']} kg',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                    ),
-                  ],
-                ),
-              );
-            }).toList(),
-
-            if (widget.subProductDetails.length > 3)
-              Text(
-                '...and ${widget.subProductDetails.length - 3} more items',
-                style: TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
-              ),
-
-            const Divider(height: 20),
-
-            // Total amount
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.green.shade50,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.green.shade100),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Total Amount:',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey.shade800,
-                    ),
-                  ),
-                  Text(
-                    '₹${widget.amount.toStringAsFixed(2)}',
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.green.shade700,
-                    ),
-                  ),
-                ],
-              ),
+            const Text(
+              'Order has been marked as completed.',
+              style: TextStyle(fontWeight: FontWeight.bold),
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildDetailRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            '$label:',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey.shade600,
-            ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context); // Close dialog
+              Navigator.pop(context); // Go back to previous screen
+            },
+            child: const Text('Done'),
           ),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w500,
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context); // Close dialog
+              Navigator.pop(context); // Go back to previous screen
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: PRIMARY,
             ),
+            child: const Text('View Order Details'),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildProcessingIndicator() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CircularProgressIndicator(
-            valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
-            strokeWidth: 3,
-          ),
-          const SizedBox(height: 20),
-          Text(
-            _paymentStatus,
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w500,
-              color: Colors.blue,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 10),
-          Text(
-            'Please wait...',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey.shade600,
-            ),
-          ),
-        ],
+
+
+  // Copy UPI ID to clipboard
+  void _copyUpiIdToClipboard() {
+    Clipboard.setData(ClipboardData(text: _upiId));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('UPI ID copied to clipboard'),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
+  // Share payment details
+  void _sharePaymentDetails() {
+    final message = '''
+Payment Request for Order $_orderReference
+
+Amount: ₹${_amountController.text}
+UPI ID: $_upiId
+Note: ${_noteController.text}
+
+Please make the payment using any UPI app.
+''';
+
+    // In a real app, you would use a share plugin here
+    // For now, copy to clipboard
+    Clipboard.setData(ClipboardData(text: message));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Payment details copied to clipboard. Share with customer.'),
+        backgroundColor: Colors.green,
       ),
     );
   }
@@ -529,146 +563,466 @@ class _PaymentScreenState extends State<PaymentScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Payment'),
-        backgroundColor: Colors.blue,
-        foregroundColor: Colors.white,
-        elevation: 0,
+        backgroundColor: PRIMARY,
         centerTitle: true,
-        leading: IconButton(
-          icon: Icon(Icons.arrow_back),
-          onPressed: () {
-            if (!_isProcessing) Navigator.pop(context);
-          },
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator(color: PRIMARY))
+          : _buildMainContent(),
+    );
+  }
+
+  Widget _buildMainContent() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Order Summary Card
+          _buildOrderSummaryCard(),
+          const SizedBox(height: 20),
+
+          // Payment Status Card
+          if (_paymentStatus != 'pending') _buildPaymentStatusCard(),
+          if (_paymentStatus != 'pending') const SizedBox(height: 20),
+
+          // Payment Details Card
+          _buildPaymentDetailsCard(),
+          const SizedBox(height: 20),
+
+          // Error Message
+          if (_error.isNotEmpty) _buildErrorMessage(),
+          if (_error.isNotEmpty) const SizedBox(height: 20),
+
+          // Action Buttons
+          _buildActionButtons(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOrderSummaryCard() {
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Order Summary',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: PRIMARY_DARK,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _buildSummaryRow('Order ID', _orderReference),
+            _buildSummaryRow('Selling Detail ID', '$_sellingDetailId'),
+            _buildSummaryRow('Customer', _customerName),
+            if (_customerContact.isNotEmpty)
+              _buildSummaryRow('Contact', _customerContact),
+            _buildSummaryRow('Total Amount', '₹${widget.amount.toStringAsFixed(2)}'),
+            const SizedBox(height: 8),
+            const Divider(),
+            const SizedBox(height: 8),
+            Text(
+              'Items (${widget.subProductDetails.length})',
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 8),
+            ...widget.subProductDetails.map((item) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '• ${item['sub_product_name']}',
+                        style: const TextStyle(fontSize: 12),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Text(
+                      '${item['weight']} kg',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ],
         ),
       ),
-      body: Column(
+    );
+  }
+
+  Widget _buildSummaryRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Expanded(
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Order Summary
-                  _buildOrderSummary(),
-
-                  // Payment Method Selection
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      'Select Payment Method',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.grey.shade800,
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 8),
-
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      'Choose how you want to pay',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey.shade600,
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // UPI Apps List
-                  ..._upiApps.map((upiApp) => Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                    child: _buildUpiAppCard(upiApp),
-                  )).toList(),
-
-                  // Processing indicator
-                  if (_isProcessing)
-                    Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: _buildProcessingIndicator(),
-                    ),
-
-                  // Error message
-                  if (_error.isNotEmpty && !_isProcessing)
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.red.shade50,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.red.shade100),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(Icons.error_outline, color: Colors.red),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                _error,
-                                style: TextStyle(color: Colors.red),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-
-                  const SizedBox(height: 20),
-                ],
-              ),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 14,
             ),
           ),
-
-          // Pay Now Button
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              border: Border(top: BorderSide(color: Colors.grey.shade300)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.05),
-                  blurRadius: 10,
-                  offset: Offset(0, -2),
-                ),
-              ],
-            ),
-            child: _isProcessing
-                ? SizedBox() // Hide button when processing
-                : ElevatedButton(
-              onPressed: _processPayment,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _selectedUpiApp != null ? Colors.green : Colors.grey.shade400,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                minimumSize: const Size(double.infinity, 56),
-                elevation: 3,
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.payment, size: 22),
-                  const SizedBox(width: 12),
-                  Text(
-                    'Pay Now ₹${widget.amount.toStringAsFixed(2)}',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.w500,
+              fontSize: 14,
             ),
           ),
         ],
       ),
     );
   }
+
+  Widget _buildPaymentStatusCard() {
+    Color statusColor;
+    IconData statusIcon;
+    String statusText;
+
+    switch (_paymentStatus) {
+      case 'completed':
+        statusColor = Colors.green;
+        statusIcon = Icons.check_circle;
+        statusText = 'Payment Completed';
+        break;
+      case 'processing':
+        statusColor = Colors.orange;
+        statusIcon = Icons.pending;
+        statusText = 'Payment Processing';
+        break;
+      case 'failed':
+        statusColor = Colors.red;
+        statusIcon = Icons.error;
+        statusText = 'Payment Failed';
+        break;
+      default:
+        statusColor = Colors.grey;
+        statusIcon = Icons.pending;
+        statusText = 'Payment Pending';
+    }
+
+    return Card(
+      color: statusColor.withOpacity(0.1),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: statusColor.withOpacity(0.3)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Icon(statusIcon, color: statusColor, size: 32),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    statusText,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: statusColor,
+                    ),
+                  ),
+                  if (_paymentMessage.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        _paymentMessage,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  if (_transactionId != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        'Txn ID: $_transactionId',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  if (_selectedUpiApp.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        'UPI App: $_selectedUpiApp',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPaymentDetailsCard() {
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Payment Details',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: PRIMARY_DARK,
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // UPI ID Section
+            const Text(
+              'Pay To UPI ID:',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: Colors.grey,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: PRIMARY_LIGHT,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.account_balance_wallet, color: PRIMARY),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _upiId.isNotEmpty ? _upiId : 'UPI ID not available',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: _upiId.isNotEmpty ? PRIMARY_DARK : Colors.grey,
+                      ),
+                    ),
+                  ),
+                  if (_upiId.isNotEmpty)
+                    IconButton(
+                      onPressed: _copyUpiIdToClipboard,
+                      icon: const Icon(Icons.content_copy, size: 20),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Amount Input
+            TextField(
+              controller: _amountController,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: InputDecoration(
+                labelText: 'Amount (₹)',
+                prefixIcon: const Icon(Icons.currency_rupee),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}')),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // Note Input
+            TextField(
+              controller: _noteController,
+              decoration: InputDecoration(
+                labelText: 'Payment Note',
+                prefixIcon: const Icon(Icons.note),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              maxLines: 2,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildErrorMessage() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: ERROR.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: ERROR.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline, color: ERROR),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              _error,
+              style: const TextStyle(color: ERROR),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButtons() {
+    return Column(
+      children: [
+        if (_paymentStatus != 'completed')
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: _paymentInProgress ? null : _initiateUpiPayment,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: PRIMARY,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: _paymentInProgress
+                  ? const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
+                  ),
+                  SizedBox(width: 12),
+                  Text(
+                    'Processing...',
+                    style: TextStyle(fontSize: 16),
+                  ),
+                ],
+              )
+                  : const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.payment, size: 24),
+                  SizedBox(width: 12),
+                  Text(
+                    'Start UPI Payment',
+                    style: TextStyle(fontSize: 16),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+        const SizedBox(height: 12),
+
+        if (_paymentStatus == 'processing')
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: _isLoading ? null : _verifyPayment,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: _isLoading
+                  ? const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
+                  ),
+                  SizedBox(width: 12),
+                  Text(
+                    'Verifying...',
+                    style: TextStyle(fontSize: 16),
+                  ),
+                ],
+              )
+                  : const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.verified, size: 24),
+                  SizedBox(width: 12),
+                  Text(
+                    'Verify Payment',
+                    style: TextStyle(fontSize: 16),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+        const SizedBox(height: 12),
+
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton(
+            onPressed: _sharePaymentDetails,
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(color: PRIMARY),
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            child: const Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.share, size: 24, color: PRIMARY),
+                SizedBox(width: 12),
+                Text(
+                  'Share Payment Details',
+                  style: TextStyle(fontSize: 16, color: PRIMARY),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+
 }

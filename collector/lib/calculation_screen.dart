@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:collector/services/api_services.dart';
 import 'package:collector/model/product_model.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 const PRIMARY = Color(0xFF9C8E18);
 const PRIMARY_LIGHT = Color(0xFFF7EEA8);
@@ -48,13 +50,27 @@ class _CalculationScreenState extends State<CalculationScreen> {
   List<Map<String, dynamic>> _savedSelections = [];
   bool _hasSavedData = false;
 
+  // Store the final order data
+  late Map<String, dynamic> _finalOrderData;
+
+  // Store API response data
+  late Map<String, dynamic> _apiResponseData;
+
   @override
   void initState() {
     super.initState();
 
     print('DEBUG: CalculationScreen initialized');
+    print('DEBUG: Order Data received: ${widget.orderData}');
     print('DEBUG: Number of calculationRequests: ${widget.calculationRequests.length}');
     print('DEBUG: CalculationResponse provided: ${widget.calculationResponse != null}');
+    print('DEBUG: Is Edit Mode: ${widget.isEditMode}');
+
+    // Store the order data
+    _finalOrderData = Map<String, dynamic>.from(widget.orderData);
+
+    // Initialize API response data
+    _apiResponseData = {};
 
     // Initialize SharedPreferences
     _initSharedPreferences().then((_) {
@@ -102,7 +118,7 @@ class _CalculationScreenState extends State<CalculationScreen> {
     if (savedData != null && savedData.isNotEmpty) {
       try {
         // Parse the saved data
-        final Map<String, dynamic> data = savedData as Map<String, dynamic>;
+        final Map<String, dynamic> data = json.decode(savedData);
         final List<dynamic> requests = data['requests'] as List<dynamic>;
 
         setState(() {
@@ -168,7 +184,7 @@ class _CalculationScreenState extends State<CalculationScreen> {
       'timestamp': DateTime.now().toIso8601String(),
     };
 
-    await _prefs.setString('calculation_data', calculationData.toString());
+    await _prefs.setString('calculation_data', json.encode(calculationData));
     print('DEBUG: Calculation data saved to SharedPreferences');
   }
 
@@ -193,6 +209,9 @@ class _CalculationScreenState extends State<CalculationScreen> {
           ),
         );
       }
+
+      // Update the order data with actual weights
+      _updateOrderDataWithActualWeights();
 
       // Recalculate with actual weights
       final res = await _apiService.calculatePrice(updatedRequests);
@@ -220,27 +239,135 @@ class _CalculationScreenState extends State<CalculationScreen> {
     }
   }
 
+  /// Update order data with actual weights
+  void _updateOrderDataWithActualWeights() {
+    // Update selling_sub_products with actual weights
+    if (_finalOrderData['selling_sub_products'] != null) {
+      final List<dynamic> subProducts = List.from(_finalOrderData['selling_sub_products']);
+
+      for (int i = 0; i < subProducts.length; i++) {
+        final subProduct = subProducts[i];
+        final subProductId = subProduct['sub_product_id'];
+        final controller = _actualWeightControllers[subProductId];
+
+        if (controller != null) {
+          final actualWeight = double.tryParse(controller.text) ?? 0;
+          subProducts[i]['weight'] = actualWeight;
+        }
+      }
+
+      _finalOrderData['selling_sub_products'] = subProducts;
+    }
+
+    // Update sub_products_details with actual weights
+    if (_finalOrderData['sub_products_details'] != null) {
+      final List<dynamic> subProductsDetails = List.from(_finalOrderData['sub_products_details']);
+
+      for (int i = 0; i < subProductsDetails.length; i++) {
+        final subProduct = subProductsDetails[i];
+        final subProductId = subProduct['id'];
+        final controller = _actualWeightControllers[subProductId];
+
+        if (controller != null) {
+          final actualWeight = double.tryParse(controller.text) ?? 0;
+          subProductsDetails[i]['weight'] = actualWeight;
+        }
+      }
+
+      _finalOrderData['sub_products_details'] = subProductsDetails;
+    }
+
+    // Update total estimated weight
+    double totalWeight = 0;
+    for (final controller in _actualWeightControllers.values) {
+      totalWeight += double.tryParse(controller.text) ?? 0;
+    }
+    _finalOrderData['total_estimated_weight'] = totalWeight;
+
+    print('DEBUG: Order data updated with actual weights');
+  }
+
   // UPDATE ORDER STATUS API INTEGRATION
   Future<void> _updateOrderStatus() async {
     try {
       setState(() => _updatingOrder = true);
 
       // Get selling detail ID from order data
-      final sellingDetailId = widget.orderData['id'];
+      final sellingDetailId = _finalOrderData['id'];
 
       if (sellingDetailId == null) {
         throw Exception('Order ID not found');
       }
 
       print('DEBUG: Updating order status for selling_detail_id: $sellingDetailId');
+      print('DEBUG: Final order data: $_finalOrderData');
+
+      // Prepare productDetails from selling_sub_products
+      final List<Map<String, dynamic>> productDetails = [];
+
+      if (_finalOrderData['selling_sub_products'] != null) {
+        final List<dynamic> subProducts = List.from(_finalOrderData['selling_sub_products']);
+
+        for (final product in subProducts) {
+          final subProductId = product['sub_product_id'];
+          final controller = _actualWeightControllers[subProductId];
+          final actualWeight = controller != null ?
+          double.tryParse(controller.text) ?? product['weight'] ?? 0 :
+          product['weight'] ?? 0;
+
+          productDetails.add({
+            'sub_product_id': subProductId,
+            'weight': actualWeight,
+          });
+        }
+      }
+
+      // Prepare the data for API call as per requirements
+      final updateData = {
+        'selling_detail_id': sellingDetailId,
+        'productDetails': productDetails,
+      };
+
+      print('DEBUG: Final updateData: $updateData');
 
       // Call API to update order status
-      final response = await _apiService.updateOrderStatus(sellingDetailId);
+      final response = await _updateSellingDetail(updateData);
 
       print('DEBUG: Order update response: $response');
 
+      // Store the complete API response
+      _apiResponseData = response;
+
       // Extract message from response
       final message = response['message'] ?? 'Order updated successfully';
+
+      // Update the final order data with response data if available
+      if (response['data'] != null) {
+        final responseData = response['data'] as Map<String, dynamic>;
+
+        // Update all fields from response
+        _finalOrderData = Map<String, dynamic>.from(responseData);
+
+        // Ensure we keep the selling_detail_id
+        _finalOrderData['id'] = responseData['id'] ?? sellingDetailId;
+
+        // Update selling_sub_products from sub_product_details
+        if (responseData['sub_product_details'] != null) {
+          final List<dynamic> subProductDetails = List.from(responseData['sub_product_details']);
+          final List<Map<String, dynamic>> sellingSubProducts = [];
+
+          for (var detail in subProductDetails) {
+            sellingSubProducts.add({
+              'sub_product_id': detail['sub_product_id'],
+              'sub_product_name': detail['sub_product_name'],
+              'unit': 'kg', // Default unit
+              'weight': detail['weight'],
+            });
+          }
+
+          _finalOrderData['selling_sub_products'] = sellingSubProducts;
+        }
+      }
 
       // Show success message
       ScaffoldMessenger.of(context).showSnackBar(
@@ -268,23 +395,74 @@ class _CalculationScreenState extends State<CalculationScreen> {
     }
   }
 
+  /// API call to update selling detail
+  Future<Map<String, dynamic>> _updateSellingDetail(Map<String, dynamic> data) async {
+    final url = Uri.parse('https://api.bhangarseva.com/selling_details/selling-detail/update/');
+
+    print('DEBUG: Updating selling detail with data: $data');
+
+    final response = await http.post(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        // Add your authorization headers if needed
+        // 'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode(data),
+    );
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      throw Exception('Failed to update selling detail. Status code: ${response.statusCode}');
+    }
+  }
+
+  /// Get actual weights data for API
+  List<Map<String, dynamic>> _getActualWeightsData() {
+    final List<Map<String, dynamic>> actualWeights = [];
+
+    for (final req in widget.calculationRequests) {
+      final controller = _actualWeightControllers[req.subProductId];
+      final actualWeight = double.tryParse(controller?.text ?? '0') ?? 0;
+
+      actualWeights.add({
+        'sub_product_id': req.subProductId,
+        'actual_weight': actualWeight,
+        'estimated_weight': req.estimatedWeight ?? 0,
+      });
+    }
+
+    return actualWeights;
+  }
+
   void _navigateToPaymentScreen() {
-    // Prepare sub product details for payment screen
-    final subProductDetails = _prepareSubProductDetails();
+    // Prepare sub product details for payment screen using API response data
+    final subProductDetails = _prepareSubProductDetailsFromApiResponse();
     final totalAmount = _getTotalAmount();
 
-    // Get order ID and customer phone
-    final orderId = widget.orderData['id'] is int
-        ? widget.orderData['id'] as int
-        : int.tryParse(widget.orderData['id']?.toString() ?? '') ?? 0;
+    // Get order ID from API response or final order data
+    final orderId = _apiResponseData.isNotEmpty
+        ? (_apiResponseData['selling_detail_id'] ?? _apiResponseData['data']?['id'])
+        : (_finalOrderData['id'] is int
+        ? _finalOrderData['id'] as int
+        : int.tryParse(_finalOrderData['id']?.toString() ?? '') ?? 0);
 
-    final customerPhone = widget.orderData['customer_phone']?.toString() ??
-        widget.orderData['phone']?.toString() ?? '';
+    // Try multiple possible phone fields
+    final customerPhone = _finalOrderData['contact']?.toString() ??
+        _finalOrderData['customer_phone']?.toString() ??
+        _finalOrderData['phone']?.toString() ?? '';
+
+    // Get user name
+    final userName = _finalOrderData['user_name']?.toString() ??
+        _finalOrderData['available_person_name']?.toString() ??
+        'Customer';
 
     print('DEBUG: Navigating to PaymentScreen');
     print('DEBUG: orderId: $orderId');
     print('DEBUG: totalAmount: $totalAmount');
     print('DEBUG: customerPhone: $customerPhone');
+    print('DEBUG: userName: $userName');
     print('DEBUG: subProductDetails count: ${subProductDetails.length}');
 
     Navigator.push(
@@ -294,19 +472,84 @@ class _CalculationScreenState extends State<CalculationScreen> {
           orderId: orderId,
           amount: totalAmount,
           customerPhone: customerPhone,
-          orderData: widget.orderData,
+          customerName: userName,
+          orderData: _finalOrderData, // Pass the final updated order data
           calculationResponse: _response!,
           subProductDetails: subProductDetails,
+          apiResponseData: _apiResponseData, // Pass the complete API response
         ),
       ),
     );
   }
 
-  // Prepare sub product details for payment screen
-  List<Map<String, dynamic>> _prepareSubProductDetails() {
+  // Prepare sub product details for payment screen from API response
+  List<Map<String, dynamic>> _prepareSubProductDetailsFromApiResponse() {
     final List<Map<String, dynamic>> details = [];
 
-    if (_response?.items != null) {
+    // First check if we have API response data
+    if (_apiResponseData.isNotEmpty && _apiResponseData['data'] != null) {
+      final responseData = _apiResponseData['data'] as Map<String, dynamic>;
+
+      if (responseData['sub_product_details'] != null) {
+        final List<dynamic> subProducts = List.from(responseData['sub_product_details']);
+
+        for (final product in subProducts) {
+          final subProductId = product['sub_product_id'] as int?;
+          final actualWeight = double.tryParse(product['weight'].toString()) ?? 0;
+
+          // Find the corresponding calculation request for rates
+          CalculationRequest? request;
+          for (var req in widget.calculationRequests) {
+            if (req.subProductId == subProductId) {
+              request = req;
+              break;
+            }
+          }
+
+          details.add({
+            'sub_product_id': subProductId,
+            'sub_product_name': product['sub_product_name'],
+            'weight': actualWeight,
+            'estimated_weight': product['weight'], // Use actual as estimated
+            'my_rate': request?.productRate ?? 0,
+            'other_rate': request?.otherRate ?? 0,
+            'extra_money': 0, // Calculate if needed
+            'unit': 'kg', // Default unit from API
+          });
+        }
+      }
+    }
+    // Fallback to original method
+    else if (_finalOrderData['sub_product_details'] != null) {
+      final List<dynamic> subProducts = List.from(_finalOrderData['sub_product_details']);
+
+      for (final product in subProducts) {
+        final subProductId = product['sub_product_id'] as int?;
+        final actualWeight = double.tryParse(product['weight'].toString()) ?? 0;
+
+        // Find the corresponding calculation request for rates
+        CalculationRequest? request;
+        for (var req in widget.calculationRequests) {
+          if (req.subProductId == subProductId) {
+            request = req;
+            break;
+          }
+        }
+
+        details.add({
+          'sub_product_id': subProductId,
+          'sub_product_name': product['sub_product_name'],
+          'weight': actualWeight,
+          'estimated_weight': product['weight'], // Use actual as estimated
+          'my_rate': request?.productRate ?? 0,
+          'other_rate': request?.otherRate ?? 0,
+          'extra_money': 0, // Calculate if needed
+          'unit': product['unit']?.toString() ?? 'kg',
+        });
+      }
+    }
+    // Fallback to original calculation response method
+    else if (_response?.items != null) {
       for (final item in _response!.items!) {
         final subProductId = item['sub_product_id'] as int?;
         final controller = subProductId != null
@@ -315,19 +558,53 @@ class _CalculationScreenState extends State<CalculationScreen> {
 
         final actualWeight = double.tryParse(controller?.text ?? '0') ?? 0;
 
+        // Find the corresponding calculation request for rates
+        CalculationRequest? request;
+        for (var req in widget.calculationRequests) {
+          if (req.subProductId == subProductId) {
+            request = req;
+            break;
+          }
+        }
+
         details.add({
           'sub_product_id': subProductId,
           'sub_product_name': item['sub_product_name'],
           'weight': actualWeight,
           'estimated_weight': item['estimated_weight'],
-          'my_rate': item['my_rate'],
-          'other_rate': item['other_rate'],
+          'my_rate': request?.productRate ?? item['my_rate'],
+          'other_rate': request?.otherRate ?? item['other_rate'],
           'extra_money': item['extra_money'],
+          'unit': _getUnitForSubProduct(subProductId),
         });
       }
     }
 
     return details;
+  }
+
+  /// Get unit for sub product
+  String _getUnitForSubProduct(int? subProductId) {
+    if (subProductId == null) return 'kg';
+
+    // Check in order data
+    if (_finalOrderData['selling_sub_products'] != null) {
+      for (var product in _finalOrderData['selling_sub_products']) {
+        if (product['sub_product_id'] == subProductId) {
+          return product['unit']?.toString() ?? 'kg';
+        }
+      }
+    }
+
+    if (_finalOrderData['sub_products_details'] != null) {
+      for (var product in _finalOrderData['sub_products_details']) {
+        if (product['id'] == subProductId) {
+          return product['unit']?.toString() ?? 'kg';
+        }
+      }
+    }
+
+    return 'kg';
   }
 
   // Calculate total amount
@@ -596,7 +873,7 @@ class _CalculationScreenState extends State<CalculationScreen> {
   }
 
   Widget _orderHeader() {
-    final orderId = widget.orderData['order_id'] ?? widget.orderData['id'] ?? 'N/A';
+    final orderId = _finalOrderData['order_id'] ?? _finalOrderData['id'] ?? 'N/A';
 
     return Container(
       padding: const EdgeInsets.all(12),
@@ -619,11 +896,33 @@ class _CalculationScreenState extends State<CalculationScreen> {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  widget.orderData['address'] ?? 'N/A',
+                  _finalOrderData['address'] ?? 'N/A',
                   style: const TextStyle(color: Colors.white70, fontSize: 13),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              const Icon(Icons.person, size: 14, color: Colors.white70),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  _finalOrderData['available_person_name'] ??
+                      _finalOrderData['user_name'] ?? 'N/A',
+                  style: const TextStyle(color: Colors.white70, fontSize: 13),
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Icon(Icons.phone, size: 14, color: Colors.white70),
+              const SizedBox(width: 6),
+              Text(
+                _finalOrderData['contact'] ??
+                    _finalOrderData['customer_phone'] ?? 'N/A',
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
               ),
             ],
           ),
@@ -641,7 +940,7 @@ class _CalculationScreenState extends State<CalculationScreen> {
                   const Icon(Icons.edit, size: 12, color: Colors.orange),
                   const SizedBox(width: 4),
                   Text(
-                    'Edit Mode - Order ID: ${widget.orderData['id']}',
+                    'Edit Mode - Updated: ${widget.calculationRequests.length} items',
                     style: const TextStyle(
                       color: Colors.orange,
                       fontSize: 11,
@@ -682,12 +981,12 @@ class _CalculationScreenState extends State<CalculationScreen> {
                     color: PRIMARY_DARK,
                   ),
                 ),
-                if (requestsCount > 0 && itemsCount == 0)
+                if (widget.isEditMode)
                   Text(
-                    'Calculating...',
+                    'Original: ${_finalOrderData['selling_sub_products']?.length ?? 0} items',
                     style: TextStyle(
                       fontSize: 11,
-                      color: Colors.orange.shade700,
+                      color: Colors.blue.shade700,
                     ),
                   ),
               ],
@@ -895,21 +1194,17 @@ class _CalculationScreenState extends State<CalculationScreen> {
                       width: 120,
                       child: TextField(
                         controller: controller,
-                        keyboardType:
-                        const TextInputType.numberWithOptions(decimal: true),
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
                         inputFormatters: [
-                          FilteringTextInputFormatter.allow(
-                              RegExp(r'^\d*\.?\d{0,2}')),
+                          FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}')),
                         ],
                         textAlign: TextAlign.center,
                         decoration: InputDecoration(
                           hintText: "0.00",
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 10),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
-                            borderSide:
-                            BorderSide(color: PRIMARY.withOpacity(0.5)),
+                            borderSide: BorderSide(color: PRIMARY.withOpacity(0.5)),
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
@@ -1002,11 +1297,15 @@ class _CalculationScreenState extends State<CalculationScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          _summaryRow("Our Total Price",
-              "₹${(totals.totalMyPrice ?? 0).toStringAsFixed(2)}"),
+          _summaryRow(
+            "Our Total Price",
+            "₹${(totals.totalMyPrice ?? 0).toStringAsFixed(2)}",
+          ),
           const SizedBox(height: 6),
-          _summaryRow("Other Total Price",
-              "₹${(totals.totalOtherPrice ?? 0).toStringAsFixed(2)}"),
+          _summaryRow(
+            "Other Total Price",
+            "₹${(totals.totalOtherPrice ?? 0).toStringAsFixed(2)}",
+          ),
           const SizedBox(height: 10),
           const Divider(color: Colors.white54, height: 1),
           const SizedBox(height: 12),

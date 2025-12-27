@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'calculation_screen.dart';
 import 'model/product_model.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 class CombinedProductSelectionScreen extends StatefulWidget {
   final Map<String, dynamic> orderData;
@@ -32,12 +34,13 @@ class _CombinedProductSelectionScreenState
 
   bool _isLoading = true;
   bool _isCalculating = false;
+  bool _isUpdatingOrder = false;
   String _error = '';
   String _searchQuery = '';
 
   CalculationResponse? _calculationResponse;
 
-  late final Map<String, dynamic> _orderData;
+  late Map<String, dynamic> _orderData;
   bool _isEditMode = false;
 
   final Map<int, double> _alreadySelectedProducts = {};
@@ -57,7 +60,8 @@ class _CombinedProductSelectionScreenState
   @override
   void initState() {
     super.initState();
-    _orderData = widget.orderData;
+    _orderData = Map<String, dynamic>.from(widget.orderData);
+    _isEditMode = _orderData.containsKey('id');
     _initSharedPreferences();
     _parseOrderData();
     _loadProducts();
@@ -128,7 +132,7 @@ class _CombinedProductSelectionScreenState
       };
     }).toList();
 
-    await _prefs.setString(_selectionKey, productJsonList.toString());
+    await _prefs.setString(_selectionKey, json.encode(productJsonList));
     print('Saved ${selectedProducts.length} products to SharedPreferences');
   }
 
@@ -138,7 +142,7 @@ class _CombinedProductSelectionScreenState
     if (savedData != null && savedData.isNotEmpty) {
       try {
         // Parse the saved data
-        final List<dynamic> productList = savedData as List<dynamic>;
+        final List<dynamic> productList = json.decode(savedData);
 
         for (var productData in productList) {
           final productId = productData['product_id'] as int;
@@ -172,10 +176,25 @@ class _CombinedProductSelectionScreenState
   void _parseOrderData() {
     _isEditMode = _orderData.containsKey('id');
 
-    if (_orderData['sub_product_details'] != null) {
-      for (var d in _orderData['sub_product_details']) {
-        _alreadySelectedProducts[d['sub_product_id']] =
-            (d['weight'] ?? 0).toDouble();
+    // Clear existing selections first
+    _alreadySelectedProducts.clear();
+
+    // Parse from selling_sub_products array
+    if (_orderData['selling_sub_products'] != null) {
+      for (var d in _orderData['selling_sub_products']) {
+        if (d['sub_product_id'] != null && d['weight'] != null) {
+          _alreadySelectedProducts[d['sub_product_id']] =
+              (d['weight'] ?? 0).toDouble();
+        }
+      }
+    }
+    // Also check sub_products_details as fallback
+    else if (_orderData['sub_products_details'] != null) {
+      for (var d in _orderData['sub_products_details']) {
+        if (d['id'] != null && d['weight'] != null) {
+          _alreadySelectedProducts[d['id']] =
+              (d['weight'] ?? 0).toDouble();
+        }
       }
     }
   }
@@ -191,6 +210,7 @@ class _CombinedProductSelectionScreenState
         for (var sp in p.subProducts) {
           final controller = TextEditingController();
 
+          // Check for existing selections from order data
           if (_alreadySelectedProducts.containsKey(sp.id)) {
             controller.text = _alreadySelectedProducts[sp.id].toString();
             _productSelections[p.id]![sp.id] = true;
@@ -368,8 +388,164 @@ class _CombinedProductSelectionScreenState
       'timestamp': DateTime.now().toIso8601String(),
     };
 
-    await _prefs.setString('calculation_data', calculationData.toString());
+    await _prefs.setString('calculation_data', json.encode(calculationData));
     print('Calculation data saved to SharedPreferences');
+  }
+
+  // ---------------- UPDATE ORDER API ----------------
+
+  /// Prepare the request data for updating selling detail
+  Map<String, dynamic> _prepareUpdateRequestData() {
+    // Get selling detail ID from order data
+    final sellingDetailId = _orderData['id'];
+
+    // Prepare productDetails array
+    final List<Map<String, dynamic>> productDetails = [];
+
+    for (var p in _products) {
+      for (var sp in p.subProducts) {
+        final selected = _productSelections[p.id]?[sp.id] ?? false;
+        if (!selected) continue;
+
+        final qty = double.tryParse(
+          _productControllers[p.id]?[sp.id]?.text ?? '',
+        ) ?? 0;
+
+        if (qty > 0) {
+          productDetails.add({
+            'sub_product_id': sp.id,
+            'weight': qty,
+          });
+        }
+      }
+    }
+
+    return {
+      'selling_detail_id': sellingDetailId,
+      'productDetails': productDetails,
+    };
+  }
+
+  /// Call API to update selling detail
+  Future<Map<String, dynamic>> _updateSellingDetail() async {
+    final requestData = _prepareUpdateRequestData();
+    final url = Uri.parse('https://api.bhangarseva.com/selling_details/selling-detail/update/');
+
+    print('DEBUG: Updating selling detail with data: $requestData');
+
+    final response = await http.post(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        // Add your authorization headers if needed
+        // 'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode(requestData),
+    );
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      throw Exception('Failed to update selling detail. Status code: ${response.statusCode}');
+    }
+  }
+
+  /// Update order and navigate to calculation screen with API response
+  Future<void> _updateOrderAndNavigate() async {
+    try {
+      setState(() => _isUpdatingOrder = true);
+
+      // Call API to update selling detail
+      final response = await _updateSellingDetail();
+
+      print('DEBUG: Order update response: $response');
+
+      // Extract message from response
+      final message = response['message'] ?? 'Order updated successfully';
+
+      // Update the order data with response data
+      if (response['data'] != null) {
+        final responseData = response['data'] as Map<String, dynamic>;
+
+        // Update our local order data with server response
+        _orderData = Map<String, dynamic>.from(responseData);
+
+        // Ensure we keep the selling_detail_id
+        if (responseData['id'] != null) {
+          _orderData['id'] = responseData['id'];
+        }
+
+        // Update selling_sub_products from sub_product_details
+        if (responseData['sub_product_details'] != null) {
+          final List<dynamic> subProductDetails = List.from(responseData['sub_product_details']);
+          final List<Map<String, dynamic>> sellingSubProducts = [];
+
+          for (var detail in subProductDetails) {
+            sellingSubProducts.add({
+              'sub_product_id': detail['sub_product_id'],
+              'sub_product_name': detail['sub_product_name'],
+              'unit': 'kg', // Default unit
+              'weight': detail['weight'],
+            });
+          }
+
+          _orderData['selling_sub_products'] = sellingSubProducts;
+        }
+      }
+
+      // Show success message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+
+      // Navigate to CalculationScreen with updated order data
+      _navigateToCalculationScreen();
+
+    } catch (e) {
+      print('DEBUG: Error updating order: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to update order: ${e.toString()}'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } finally {
+      setState(() => _isUpdatingOrder = false);
+    }
+  }
+
+  /// Navigate to CalculationScreen
+  void _navigateToCalculationScreen() {
+    // Prepare calculation requests
+    final calculationRequests = _getItemsWithWeight();
+
+    if (calculationRequests.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No items selected for calculation'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CalculationScreen(
+          calculationRequests: calculationRequests,
+          productName: "Multiple Products",
+          orderData: _orderData, // Pass the updated order data from API response
+          calculationResponse: _calculationResponse,
+          isEditMode: _isEditMode,
+        ),
+      ),
+    );
   }
 
   // ---------------- UI ----------------
@@ -547,33 +723,50 @@ class _CombinedProductSelectionScreenState
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
 
-      // 🔘 VIEW DETAILS BUTTON KEPT
+      // 🔘 VIEW DETAILS BUTTON - UPDATED TO CALL UPDATE API
       bottomNavigationBar: _calculationResponse != null
           ? SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: ElevatedButton(
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => CalculationScreen(
-                    calculationRequests: _getItemsWithWeight(),
-                    productName: "Multiple Products",
-                    orderData: _orderData,
-                    calculationResponse: _calculationResponse,
-                    isEditMode: _isEditMode,
-                  ),
-                ),
-              );
+            onPressed: _isUpdatingOrder ? null : () {
+              if (_isEditMode) {
+                // Call update API first, then navigate
+                _updateOrderAndNavigate();
+              } else {
+                // For new orders, just navigate to calculation screen
+                _navigateToCalculationScreen();
+              }
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: brownPrimary,
               padding: const EdgeInsets.symmetric(vertical: 14),
             ),
-            child: const Text(
-              'View Detailed Calculation',
-              style: TextStyle(
+            child: _isUpdatingOrder
+                ? const Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2,
+                  ),
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'Updating Order...',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            )
+                : Text(
+              _isEditMode ? 'Update & View Calculation' : 'View Detailed Calculation',
+              style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
               ),

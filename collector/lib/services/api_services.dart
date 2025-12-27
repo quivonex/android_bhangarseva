@@ -231,7 +231,7 @@ class ApiService {
     }
   }
 
-  static Future<Map<String, dynamic>> verifyPayment(String orderId,
+  static Future<Map<String, dynamic>> verifyPaymentPlan(String orderId,
       String paymentId,
       String signature,
       String planName) async {
@@ -344,6 +344,40 @@ class ApiService {
       }
     } catch (e) {
       throw Exception('Failed to accept order: $e');
+    }
+  }
+
+
+  Future<Map<String, dynamic>> verifyPaymentApi(String text, int sellingDetailId, String? paymentId, String? transactionId, String selectedUpiApp) async {
+    try {
+      final bhangarwalaId = await ApiService.getUserId();
+      final finalAmount = double.parse(text);
+
+      final response = await http.post(
+        Uri.parse('$baseUrl/selling_details/update-order-status/'),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          "bhangarwala_id": bhangarwalaId,
+          "selling_detail_id": sellingDetailId,
+          "action": "Completed",
+          "final_amount": finalAmount,
+          "payment_id": paymentId ?? 'PAY${DateTime.now().millisecondsSinceEpoch}',
+          "transaction_id": transactionId ?? 'TXN${DateTime.now().millisecondsSinceEpoch}',
+          "payment_status": "completed",
+          "payment_method": "upi",
+          "upi_app": selectedUpiApp,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      } else {
+        throw Exception('HTTP Error ${response.statusCode}: ${response.reasonPhrase}');
+      }
+    } catch (e) {
+      throw Exception('Failed to verify payment: $e');
     }
   }
 
@@ -669,6 +703,29 @@ class ApiService {
       throw Exception('Failed to update order status');
     }
   }
+
+  Future<Map<String, dynamic>> updateSellingDetail(Map<String, dynamic> data) async {
+    final url = Uri.parse('$baseUrl/selling_details/selling-detail/update/');
+
+    print('DEBUG: Updating selling detail with data: $data');
+
+    final response = await http.post(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        // Add your authorization headers if needed
+        // 'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode(data),
+    );
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      throw Exception('Failed to update selling detail. Status code: ${response.statusCode}');
+    }
+  }
+
   static Future<Map<String, dynamic>> getAllHeavyOrders() async {
     try {
       final response = await http.post(

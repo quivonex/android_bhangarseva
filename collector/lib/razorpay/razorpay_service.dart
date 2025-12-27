@@ -72,7 +72,7 @@ class RazorpayService {
     if (_currentOrderId != null && _currentPlanName != null) {
       try {
         // Verify payment with backend
-        final result = await ApiService.verifyPayment(
+        final result = await ApiService.verifyPaymentPlan(
           _currentOrderId!,
           response.paymentId!,
           response.signature!,
