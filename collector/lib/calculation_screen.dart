@@ -119,6 +119,9 @@ class _CalculationScreenState extends State<CalculationScreen> {
       try {
         // Parse the saved data
         final Map<String, dynamic> data = json.decode(savedData);
+        final Map<String, dynamic>? responseData = data['response'] != null
+            ? Map<String, dynamic>.from(data['response'] as Map)
+            : null;
         final List<dynamic> requests = data['requests'] as List<dynamic>;
 
         setState(() {
@@ -126,10 +129,50 @@ class _CalculationScreenState extends State<CalculationScreen> {
           _hasSavedData = _savedSelections.isNotEmpty;
         });
 
+        // Also load the calculation response if available
+        if (responseData != null) {
+          _loadResponseFromSavedData(responseData);
+        }
+
         print('DEBUG: Loaded ${_savedSelections.length} saved selections');
+        print('DEBUG: Saved data structure: ${_savedSelections.first}');
       } catch (e) {
         print('DEBUG: Error loading saved data: $e');
+        setState(() {
+          _hasSavedData = false;
+          _savedSelections.clear();
+        });
       }
+    }
+  }
+
+  void _loadResponseFromSavedData(Map<String, dynamic> responseData) {
+    try {
+      // Parse items
+      List<Map<String, dynamic>> items = [];
+      if (responseData['items'] != null) {
+        items = List<Map<String, dynamic>>.from(responseData['items'] as List);
+      }
+
+      // Parse grand totals
+      GrandTotals? grandTotals;
+      if (responseData['grandTotals'] != null) {
+        final totalsData = Map<String, dynamic>.from(responseData['grandTotals'] as Map);
+        grandTotals = GrandTotals.fromJson(totalsData);
+      }
+
+      // Create calculation response
+      if (items.isNotEmpty || grandTotals != null) {
+        setState(() {
+          _response = CalculationResponse(
+            items: items,
+            grandTotals: grandTotals,status: '',message: ''
+          );
+        });
+        print('DEBUG: Loaded calculation response from saved data');
+      }
+    } catch (e) {
+      print('DEBUG: Error parsing saved response: $e');
     }
   }
 
@@ -470,7 +513,7 @@ class _CalculationScreenState extends State<CalculationScreen> {
       MaterialPageRoute(
         builder: (_) => PaymentScreen(
           orderId: orderId,
-          amount: totalAmount,
+          amount: 10.0,
           customerPhone: customerPhone,
           customerName: userName,
           orderData: _finalOrderData, // Pass the final updated order data
@@ -623,8 +666,26 @@ class _CalculationScreenState extends State<CalculationScreen> {
     double totalValue = 0;
 
     for (var selection in _savedSelections) {
-      final weight = double.tryParse(selection['weight'].toString()) ?? 0;
-      final myRate = double.tryParse(selection['my_rate'].toString()) ?? 0;
+      // Try different possible weight field names
+      final weight = selection['estimated_weight'] != null
+          ? double.tryParse(selection['estimated_weight'].toString()) ?? 0
+          : selection['weight'] != null
+          ? double.tryParse(selection['weight'].toString()) ?? 0
+          : 0;
+
+      // Try different possible rate field names
+      final myRate = selection['product_rate'] != null
+          ? double.tryParse(selection['product_rate'].toString()) ?? 0
+          : selection['my_rate'] != null
+          ? double.tryParse(selection['my_rate'].toString()) ?? 0
+          : 0;
+
+      final otherRate = selection['other_rate'] != null
+          ? double.tryParse(selection['other_rate'].toString()) ?? 0
+          : 0;
+
+      print('DEBUG: Selection data - Weight: $weight, MyRate: $myRate, OtherRate: $otherRate');
+
       totalWeight += weight;
       totalValue += weight * myRate;
     }
@@ -692,7 +753,6 @@ class _CalculationScreenState extends State<CalculationScreen> {
       ),
     );
   }
-
   Widget _buildSavedStatItem(String label, String value) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -729,21 +789,51 @@ class _CalculationScreenState extends State<CalculationScreen> {
             itemCount: _savedSelections.length,
             itemBuilder: (context, index) {
               final item = _savedSelections[index];
+
+              // Get weight with fallback
+              final weight = item['estimated_weight'] != null
+                  ? double.tryParse(item['estimated_weight'].toString()) ?? 0
+                  : item['weight'] != null
+                  ? double.tryParse(item['weight'].toString()) ?? 0
+                  : 0;
+
+              // Get product rate with fallback
+              final productRate = item['product_rate'] != null
+                  ? double.tryParse(item['product_rate'].toString()) ?? 0
+                  : item['my_rate'] != null
+                  ? double.tryParse(item['my_rate'].toString()) ?? 0
+                  : 0;
+
+              // Get other rate
+              final otherRate = item['other_rate'] != null
+                  ? double.tryParse(item['other_rate'].toString()) ?? 0
+                  : 0;
+
+              final productName = item['sub_product_name']?.toString() ?? 'Unknown';
+              final unit = item['unit']?.toString() ?? 'kg';
+              final totalValue = weight * productRate;
+
               return ListTile(
                 leading: CircleAvatar(
                   backgroundColor: PRIMARY.withOpacity(0.1),
                   child: Text('${index + 1}'),
                 ),
-                title: Text(item['sub_product_name']?.toString() ?? 'Unknown'),
+                title: Text(productName),
                 subtitle: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Weight: ${item['weight']} ${item['unit']}'),
-                    Text('Rate: ₹${item['my_rate']} (Other: ₹${item['other_rate']})'),
+                    Text('Weight: ${weight.toStringAsFixed(2)} $unit'),
+                    Text('My Rate: ₹${productRate.toStringAsFixed(2)}'),
+                    Text('Other Rate: ₹${otherRate.toStringAsFixed(2)}'),
+                    if (productRate > otherRate)
+                      Text(
+                        'Profit per kg: ₹${(productRate - otherRate).toStringAsFixed(2)}',
+                        style: const TextStyle(color: Colors.green),
+                      ),
                   ],
                 ),
                 trailing: Text(
-                  '₹${((double.tryParse(item['weight'].toString()) ?? 0) * (double.tryParse(item['my_rate'].toString()) ?? 0)).toStringAsFixed(2)}',
+                  '₹${totalValue.toStringAsFixed(2)}',
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     color: Colors.green,
@@ -765,6 +855,7 @@ class _CalculationScreenState extends State<CalculationScreen> {
               setState(() {
                 _hasSavedData = false;
                 _savedSelections.clear();
+                _response = null;
               });
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
@@ -1386,7 +1477,7 @@ class _CalculationScreenState extends State<CalculationScreen> {
             onPressed: _updatingOrder ? null : () {
               if (widget.isEditMode) {
                 // Call API to update order status
-                _updateOrderStatus();
+                _navigateToPaymentScreen();
               } else {
                 // Navigate to PaymentScreen
                 _navigateToPaymentScreen();

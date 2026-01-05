@@ -168,27 +168,33 @@ class CalculationItem {
 
 // Response Grand Totals
 class GrandTotals {
-  final double totalMyPrice;
-  final double totalOtherPrice;
-  final double totalExtraMoney;
+  final double? totalMyPrice;
+  final double? totalOtherPrice;
+  final double? totalExtraMoney;
 
   GrandTotals({
-    required this.totalMyPrice,
-    required this.totalOtherPrice,
-    required this.totalExtraMoney,
+    this.totalMyPrice,
+    this.totalOtherPrice,
+    this.totalExtraMoney,
   });
 
   factory GrandTotals.fromJson(Map<String, dynamic> json) {
     return GrandTotals(
-      totalMyPrice: (json['total_my_price'] is num) ?
-      (json['total_my_price'] as num).toDouble() :
-      double.tryParse(json['total_my_price']?.toString() ?? '0') ?? 0.0,
-      totalOtherPrice: (json['total_other_price'] is num) ?
-      (json['total_other_price'] as num).toDouble() :
-      double.tryParse(json['total_other_price']?.toString() ?? '0') ?? 0.0,
-      totalExtraMoney: (json['total_extra_money'] is num) ?
-      (json['total_extra_money'] as num).toDouble() :
-      double.tryParse(json['total_extra_money']?.toString() ?? '0') ?? 0.0,
+      totalMyPrice: json['total_my_price'] != null
+          ? double.tryParse(json['total_my_price'].toString())
+          : json['totalMyPrice'] != null
+          ? double.tryParse(json['totalMyPrice'].toString())
+          : 0,
+      totalOtherPrice: json['total_other_price'] != null
+          ? double.tryParse(json['total_other_price'].toString())
+          : json['totalOtherPrice'] != null
+          ? double.tryParse(json['totalOtherPrice'].toString())
+          : 0,
+      totalExtraMoney: json['total_extra_money'] != null
+          ? double.tryParse(json['total_extra_money'].toString())
+          : json['totalExtraMoney'] != null
+          ? double.tryParse(json['totalExtraMoney'].toString())
+          : 0,
     );
   }
 
@@ -200,10 +206,11 @@ class GrandTotals {
     };
   }
 
+
   // For backward compatibility
-  double get totalAmount => totalMyPrice;
-  double get ourTotal => totalMyPrice;
-  double get otherTotal => totalOtherPrice;
+  double get totalAmount => totalMyPrice!;
+  double get ourTotal => totalMyPrice!;
+  double get otherTotal => totalOtherPrice!;
 }
 
 // Response from API

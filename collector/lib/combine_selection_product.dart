@@ -389,7 +389,8 @@ class _CombinedProductSelectionScreenState
     };
 
     await _prefs.setString('calculation_data', json.encode(calculationData));
-    print('Calculation data saved to SharedPreferences');
+    print('DEBUG: Calculation data saved to SharedPreferences');
+    print('DEBUG: Grand Totals saved: ${response.grandTotals?.totalMyPrice}');
   }
 
   // ---------------- UPDATE ORDER API ----------------
@@ -710,20 +711,26 @@ class _CombinedProductSelectionScreenState
         ],
       ),
 
-      // 🔘 BUTTON KEPT
-      floatingActionButton: FloatingActionButton.extended(
+      // 🔘 FLOATING ACTION BUTTON FOR CALCULATION
+      floatingActionButton: _calculationResponse == null
+          ? FloatingActionButton.extended(
         onPressed: _isCalculating ? null : _calculateTotalAmount,
         icon: _isCalculating
-            ? const CircularProgressIndicator(color: Colors.white)
+            ? const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(color: Colors.white),
+        )
             : const Icon(Icons.calculate),
         label: Text(
-          _isCalculating ? 'Calculating...' : 'Calculate Actual',
+          _isCalculating ? 'Calculating...' : 'Calculate',
         ),
         backgroundColor: brownPrimary,
-      ),
+      )
+          : null,
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
 
-      // 🔘 VIEW DETAILS BUTTON - UPDATED TO CALL UPDATE API
+      // 🔘 BOTTOM NAVIGATION BAR FOR PROCEEDING
       bottomNavigationBar: _calculationResponse != null
           ? SafeArea(
         child: Padding(
@@ -765,7 +772,9 @@ class _CombinedProductSelectionScreenState
               ],
             )
                 : Text(
-              _isEditMode ? 'Update & View Calculation' : 'View Detailed Calculation',
+              _isEditMode
+                  ? 'Update & View Calculation'
+                  : 'View Detailed Calculation',
               style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
@@ -779,7 +788,7 @@ class _CombinedProductSelectionScreenState
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
-        padding: const EdgeInsets.only(bottom: 140),
+        padding: EdgeInsets.only(bottom: _calculationResponse != null ? 0 : 80),
         children: [
           // Summary Card
           Container(
@@ -863,6 +872,131 @@ class _CombinedProductSelectionScreenState
               ],
             ),
           ),
+
+          // Calculation Result Summary (only shown when calculation is done)
+          if (_calculationResponse != null)
+            Container(
+              margin: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.green.withOpacity(0.9), Colors.green.shade700],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 8,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        "Calculation Complete",
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.check_circle, size: 14, color: Colors.white),
+                            SizedBox(width: 4),
+                            Text(
+                              "Ready",
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            "Our Total",
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(0.8),
+                              fontSize: 12,
+                            ),
+                          ),
+                          Text(
+                            "₹${_calculationResponse!.grandTotals?.totalMyPrice?.toStringAsFixed(2) ?? '0.00'}",
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            "Other Total",
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(0.8),
+                              fontSize: 12,
+                            ),
+                          ),
+                          Text(
+                            "₹${_calculationResponse!.grandTotals?.totalOtherPrice?.toStringAsFixed(2) ?? '0.00'}",
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            "Earnings",
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(0.8),
+                              fontSize: 12,
+                            ),
+                          ),
+                          Text(
+                            "₹${_calculationResponse!.grandTotals?.totalExtraMoney?.toStringAsFixed(2) ?? '0.00'}",
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
 
           // Products List
           ..._products.map(
